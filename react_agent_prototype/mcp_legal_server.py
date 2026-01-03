@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import json
-from ums_client import get_embeddings_via_ums, generate_text_via_ums
+from ums_client import get_embeddings_via_ums, generate_text_via_ums, ums_client
 
 app = FastAPI(title="MCP Legal Server", version="1.0.0")
 

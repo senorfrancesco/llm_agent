@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import json
-from ums_client import process_vision_via_ums, get_embeddings_via_ums
+from ums_client import process_vision_via_ums, get_embeddings_via_ums, ums_client
 
 app = FastAPI(title="MCP Document Server", version="1.0.0")
 

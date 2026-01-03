@@ -1,12 +1,11 @@
 """
-UMS Client - HTTP-клиент для общения MCP-серверов с Unified Model Server.
+UMS Client - HTTP-клиент для взаимодействия с Unified Model Server.
 
-Все MCP-серверы используют этот клиент для запросов инференса.
-В реальном проекте UMS будет отдельным процессом на порту 8090.
+Все MCP-серверы используют этот клиент для выполнения инференса.
 """
 
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import json
 
 UMS_URL = "http://localhost:8090"
@@ -17,14 +16,14 @@ class UMSClient:
     def __init__(self, base_url: str = UMS_URL):
         self.base_url = base_url
     
-    def infer(self, model_id: str, payload: Dict[str, Any], mode: str = "auto") -> Dict[str, Any]:
+    def infer(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> Dict[str, Any]:
         """
         Выполняет инференс через UMS.
         
         Args:
-            model_id: ID модели (например, "qwen-14b-llm", "labse-embedding")
+            model_id: ID модели (qwen-14b-llm, qwen-vl-8b, labse-embedding)
             payload: Тело запроса, специфичное для модели
-            mode: Режим работы ("auto", "gpu", "cpu", "hybrid")
+            device_mode: Режим работы (gpu, cpu, hybrid)
         
         Returns:
             Результат инференса
@@ -33,22 +32,47 @@ class UMSClient:
         
         request_body = {
             "model_id": model_id,
-            "mode": mode,
-            "priority": "normal",
-            "request_body": payload
+            "payload": payload,
+            "device_mode": device_mode,
+            "priority": "normal"
         }
         
         try:
-            print(f"[UMS_CLIENT] Sending request to {url} for model {model_id}")
+            print(f"[UMS_CLIENT] Sending inference request for model: {model_id}")
+            response = requests.post(url, json=request_body, timeout=300)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("status") == "success":
+                return data.get("result", {})
+            else:
+                raise RuntimeError(f"UMS returned error: {data}")
+        
+        except requests.exceptions.RequestException as e:
+            print(f"[UMS_CLIENT] Error: {e}")
+            raise RuntimeError(f"Failed to connect to UMS: {e}")
+    
+    def switch_model(self, model_id: str, device_mode: str = "hybrid") -> Dict[str, Any]:
+        """Переключает активную модель на UMS."""
+        url = f"{self.base_url}/switch_model"
+        
+        request_body = {
+            "model_id": model_id,
+            "device_mode": device_mode
+        }
+        
+        try:
+            print(f"[UMS_CLIENT] Switching to model: {model_id}")
             response = requests.post(url, json=request_body, timeout=120)
             response.raise_for_status()
             return response.json()
+        
         except requests.exceptions.RequestException as e:
-            print(f"[UMS_CLIENT] Error: {e}")
-            raise RuntimeError(f"UMS inference failed: {e}")
+            print(f"[UMS_CLIENT] Error switching model: {e}")
+            raise RuntimeError(f"Failed to switch model: {e}")
     
     def get_status(self) -> Dict[str, Any]:
-        """Получает статус UMS (загруженные модели, использование памяти)."""
+        """Получает статус UMS."""
         url = f"{self.base_url}/status"
         
         try:
@@ -66,61 +90,87 @@ ums_client = UMSClient()
 # Вспомогательные функции для MCP-серверов
 # ============================================================================
 
-def generate_text_via_ums(prompt: str, max_tokens: int = 512) -> str:
+def generate_text_via_ums(prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
     """
-    Генерирует текст через UMS, используя LLM-модель.
+    Генерирует текст через UMS, используя LLM-модель (Qwen-14B).
     
     Используется MCP Legal Server для анализа.
     """
     payload = {
         "prompt": prompt,
         "max_tokens": max_tokens,
-        "temperature": 0.7,
+        "temperature": temperature,
         "top_p": 0.9
     }
     
-    response = ums_client.infer("qwen-14b-llm", payload)
+    try:
+        response = ums_client.infer("qwen-14b-llm", payload, device_mode="hybrid")
+        
+        # Парсим ответ от llama-server
+        if "choices" in response:
+            return response["choices"][0].get("text", "")
+        elif "content" in response:
+            return response["content"]
+        else:
+            return str(response)
     
-    # Mock-ответ, если UMS недоступен
-    if "error" in response:
-        return f"[MOCK] Response for prompt: {prompt[:50]}..."
-    
-    return response.get("content", "")
+    except Exception as e:
+        print(f"[UMS_CLIENT] Error generating text: {e}")
+        raise
 
-def get_embeddings_via_ums(text: str) -> list:
+def get_embeddings_via_ums(text: str, normalize: bool = True) -> List[float]:
     """
-    Получает эмбеддинги текста через UMS, используя Embedding-модель.
+    Получает эмбеддинги текста через UMS, используя Embedding-модель (LaBSE).
     
     Используется MCP Legal Server для сравнения текстов.
     """
     payload = {
         "input": text,
-        "normalize": True
+        "normalize": normalize
     }
     
-    response = ums_client.infer("labse-embedding", payload)
+    try:
+        response = ums_client.infer("labse-embedding", payload, device_mode="cpu")
+        
+        # Парсим ответ от llama-server
+        if "data" in response:
+            return response["data"][0].get("embedding", [])
+        elif "embedding" in response:
+            return response["embedding"]
+        else:
+            return []
     
-    # Mock-ответ, если UMS недоступен
-    if "error" in response:
-        return [0.1] * 768  # Вектор размером 768 (LaBSE)
-    
-    return response.get("embedding", [0.1] * 768)
+    except Exception as e:
+        print(f"[UMS_CLIENT] Error getting embeddings: {e}")
+        raise
 
 def process_vision_via_ums(image_path: str, prompt: str) -> str:
     """
-    Обрабатывает изображение через UMS, используя Vision-модель.
+    Обрабатывает изображение через UMS, используя Vision-модель (Qwen-VL).
     
     Используется MCP Document Server для OCR и анализа изображений.
     """
     payload = {
-        "image_path": image_path,
-        "prompt": prompt
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_path}},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
     }
     
-    response = ums_client.infer("qwen-vl-8b", payload)
+    try:
+        response = ums_client.infer("qwen-vl-8b", payload, device_mode="hybrid")
+        
+        # Парсим ответ от llama-server
+        if "choices" in response:
+            return response["choices"][0].get("message", {}).get("content", "")
+        else:
+            return str(response)
     
-    # Mock-ответ, если UMS недоступен
-    if "error" in response:
-        return f"[MOCK] Vision response for: {prompt[:50]}..."
-    
-    return response.get("response", "")
+    except Exception as e:
+        print(f"[UMS_CLIENT] Error processing vision: {e}")
+        raise
