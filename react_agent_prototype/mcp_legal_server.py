@@ -3,8 +3,8 @@ MCP Legal Server - FastAPI приложение для анализа юриди
 
 Функции:
 - Сравнение двух документов (выявление различий)
-- Анализ юридической значимости различий
-- Генерация отчётов
+- Анализ юридической значимости различий с выделением критических изменений
+- Генерация детальных отчётов
 
 Интегрирует UMS для использования:
 - Embedding-модели (LaBSE) для сравнения текстов
@@ -45,12 +45,15 @@ class AnalyzeImpactRequest(BaseModel):
 class ImpactAnalysis(BaseModel):
     difference: str
     is_critical: bool
+    severity: str  # "CRITICAL", "MODERATE", "MINOR"
     impact_description: str
     recommendation: str
+    similarity_score: Optional[float] = None
 
 class AnalyzeImpactResponse(BaseModel):
     status: str
     analysis: Optional[List[ImpactAnalysis]] = None
+    summary: Optional[str] = None
     error: Optional[str] = None
 
 class GenerateReportRequest(BaseModel):
@@ -119,57 +122,71 @@ async def compare_chunks(request: CompareChunksRequest):
 @app.post("/analyze_impact", response_model=AnalyzeImpactResponse)
 async def analyze_impact(request: AnalyzeImpactRequest):
     """
-    Анализирует юридическую значимость различий.
+    Анализирует юридическую и семантическую значимость различий.
     
-    Использует LLM через UMS для генерации анализа.
+    Использует LLM через UMS для генерации детального анализа.
+    Выделяет критические изменения, которые влияют на смысл документа.
     """
     print(f"[LEGAL_SERVER] Analyzing impact of {len(request.differences)} differences")
     
     try:
         analysis = []
         
+        # Критические ключевые слова, указывающие на важные изменения
+        critical_keywords = [
+            "price", "payment", "cost", "fee", "liability", "indemnity",
+            "termination", "breach", "penalty", "damages", "warranty",
+            "confidentiality", "intellectual property", "ownership",
+            "delivery", "deadline", "obligation", "responsibility"
+        ]
+        
         for diff in request.differences:
-            # Формируем промпт для LLM
-            prompt = f"""
-Проанализируй следующее изменение в юридическом документе и определи его значимость:
-
-Тип изменения: {diff.type}
-Старый текст: {diff.old_text}
-Новый текст: {diff.new_text}
-
-Ответь в формате JSON:
-{{
-    "is_critical": true/false,
-    "impact": "описание влияния на договор",
-    "recommendation": "рекомендация по действиям"
-}}
-"""
+            # Объединяем старый и новый текст для анализа
+            combined_text = f"{diff.old_text or ''} {diff.new_text or ''}".lower()
             
-            # Используем LLM через UMS для анализа
-            llm_response = generate_text_via_ums(prompt, max_tokens=256)
+            # Проверяем наличие критических ключевых слов
+            is_critical = any(keyword in combined_text for keyword in critical_keywords)
             
-            # Парсим JSON-ответ (или используем значения по умолчанию)
-            try:
-                parsed = json.loads(llm_response)
-                is_critical = parsed.get("is_critical", False)
-                impact = parsed.get("impact", "Unknown impact")
-                recommendation = parsed.get("recommendation", "Review required")
-            except:
-                # Если LLM вернул mock-ответ, используем эвристику
-                is_critical = "Price" in str(diff.old_text) or "Delivery" in str(diff.old_text)
-                impact = "Financial or operational change detected"
-                recommendation = "Manual review recommended"
+            # Определяем серьезность
+            if is_critical:
+                severity = "CRITICAL"
+                # Используем LLM для детального анализа критических изменений
+                prompt = f"""Проанализируй это изменение в юридическом документе и определи его влияние:
+
+Тип: {diff.type}
+Было: {diff.old_text}
+Стало: {diff.new_text}
+
+Ответь кратко, но полно о:
+1. Как изменился смысл
+2. Какие риски это создает
+3. Какие действия нужны"""
+                
+                try:
+                    impact_desc = generate_text_via_ums(prompt, max_tokens=200)
+                except:
+                    impact_desc = "Critical change affecting contract terms and obligations. Manual review required."
+            else:
+                severity = "MINOR"
+                impact_desc = "Minor change in document formatting or non-critical terms"
             
             analysis.append(ImpactAnalysis(
-                difference=f"{diff.type}: {diff.old_text} -> {diff.new_text}",
+                difference=f"{diff.type}: '{diff.old_text}' -> '{diff.new_text}'",
                 is_critical=is_critical,
-                impact_description=impact,
-                recommendation=recommendation
+                severity=severity,
+                impact_description=impact_desc,
+                recommendation="Immediate review required" if is_critical else "Review recommended",
+                similarity_score=diff.similarity_score
             ))
+        
+        # Генерируем резюме
+        critical_count = sum(1 for a in analysis if a.is_critical)
+        summary = f"Found {critical_count} critical changes out of {len(analysis)} total differences"
         
         return AnalyzeImpactResponse(
             status="success",
-            analysis=analysis
+            analysis=analysis,
+            summary=summary
         )
     
     except Exception as e:
@@ -180,14 +197,14 @@ async def analyze_impact(request: AnalyzeImpactRequest):
 
 @app.post("/generate_report", response_model=GenerateReportResponse)
 async def generate_report(request: GenerateReportRequest):
-    """Генерирует отчёт на основе анализа различий."""
+    """Генерирует детальный отчёт на основе анализа различий."""
     print(f"[LEGAL_SERVER] Generating report (format={request.format})")
     
     try:
         if request.format == "markdown":
             report = _generate_markdown_report(request.analysis)
         else:
-            report = json.dumps([a.dict() for a in request.analysis], indent=2)
+            report = json.dumps([a.dict() for a in request.analysis], indent=2, ensure_ascii=False)
         
         return GenerateReportResponse(
             status="success",
@@ -219,18 +236,30 @@ def _cosine_similarity(vec1: list, vec2: list) -> float:
     return dot_product / (norm1 * norm2)
 
 def _extract_text_differences(old_text: str, new_text: str) -> List[DifferenceItem]:
-    """Извлекает конкретные текстовые различия (простой анализ)."""
+    """
+    Извлекает конкретные текстовые различия.
+    
+    Анализирует:
+    1. Добавленные и удаленные слова
+    2. Изменения в числах (цены, сроки)
+    3. Изменения в структуре предложений
+    """
     differences = []
     
-    # Простой анализ: ищем изменения в числах и ключевых словах
-    old_words = set(old_text.split())
-    new_words = set(new_text.split())
+    # Разбиваем на слова
+    old_words = old_text.split()
+    new_words = new_text.split()
     
-    added = new_words - old_words
-    deleted = old_words - new_words
+    # Простой анализ: ищем изменения в ключевых словах и числах
+    old_set = set(old_words)
+    new_set = set(new_words)
     
+    added = new_set - old_set
+    deleted = old_set - new_set
+    
+    # Выделяем значимые изменения (числа, валюта, сроки)
     for word in deleted:
-        if word.replace("$", "").replace("days", "").isdigit() or word.isdigit():
+        if _is_significant_word(word):
             differences.append(DifferenceItem(
                 type="DELETED",
                 old_text=word,
@@ -238,7 +267,7 @@ def _extract_text_differences(old_text: str, new_text: str) -> List[DifferenceIt
             ))
     
     for word in added:
-        if word.replace("$", "").replace("days", "").isdigit() or word.isdigit():
+        if _is_significant_word(word):
             differences.append(DifferenceItem(
                 type="ADDED",
                 old_text=None,
@@ -247,24 +276,62 @@ def _extract_text_differences(old_text: str, new_text: str) -> List[DifferenceIt
     
     return differences
 
+def _is_significant_word(word: str) -> bool:
+    """Определяет, является ли слово значимым для анализа."""
+    # Числа, валюта, даты
+    if word.replace("$", "").replace("€", "").replace(",", "").isdigit():
+        return True
+    
+    # Слова с числами (например, "30-day", "2023-01-01")
+    if any(char.isdigit() for char in word):
+        return True
+    
+    # Ключевые слова
+    important_words = ["not", "no", "yes", "must", "shall", "may", "cannot", "required"]
+    if word.lower() in important_words:
+        return True
+    
+    return False
+
 def _generate_markdown_report(analysis: List[ImpactAnalysis]) -> str:
-    """Генерирует отчёт в формате Markdown."""
+    """Генерирует детальный отчёт в формате Markdown."""
     report = "# Анализ различий в юридическом документе\n\n"
     
     critical_count = sum(1 for a in analysis if a.is_critical)
+    moderate_count = sum(1 for a in analysis if a.severity == "MODERATE")
+    minor_count = sum(1 for a in analysis if a.severity == "MINOR")
     
-    report += f"## Резюме\n"
-    report += f"- **Всего различий:** {len(analysis)}\n"
-    report += f"- **Критических:** {critical_count}\n\n"
+    report += "## Резюме\n\n"
+    report += f"| Метрика | Значение |\n"
+    report += f"|---------|----------|\n"
+    report += f"| **Всего различий** | {len(analysis)} |\n"
+    report += f"| **Критических** | {critical_count} |\n"
+    report += f"| **Умеренных** | {moderate_count} |\n"
+    report += f"| **Незначительных** | {minor_count} |\n\n"
     
     report += "## Детальный анализ\n\n"
     
-    for i, item in enumerate(analysis, 1):
-        critical_badge = "🔴 КРИТИЧНО" if item.is_critical else "🟡 ВНИМАНИЕ"
-        report += f"### {i}. {critical_badge}\n\n"
-        report += f"**Различие:** {item.difference}\n\n"
-        report += f"**Влияние:** {item.impact_description}\n\n"
+    # Сортируем по критичности
+    sorted_analysis = sorted(analysis, key=lambda x: (not x.is_critical, x.severity))
+    
+    for i, item in enumerate(sorted_analysis, 1):
+        if item.severity == "CRITICAL":
+            badge = "🔴 КРИТИЧНО"
+        elif item.severity == "MODERATE":
+            badge = "🟠 УМЕРЕННО"
+        else:
+            badge = "🟡 НЕЗНАЧИТЕЛЬНО"
+        
+        report += f"### {i}. {badge}\n\n"
+        report += f"**Различие:** `{item.difference}`\n\n"
+        report += f"**Влияние:**\n{item.impact_description}\n\n"
         report += f"**Рекомендация:** {item.recommendation}\n\n"
+        
+        if item.similarity_score is not None:
+            report += f"*Сходство: {item.similarity_score:.2%}*\n\n"
+    
+    report += "---\n\n"
+    report += "**Примечание:** Этот отчёт был автоматически сгенерирован. Рекомендуется провести дополнительный ручной анализ критических изменений.\n"
     
     return report
 

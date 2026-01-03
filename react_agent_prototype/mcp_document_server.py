@@ -2,10 +2,10 @@
 MCP Document Server - FastAPI приложение для работы с документами.
 
 Функции:
-- Загрузка документов (PDF, DOCX)
-- Извлечение текста (через OCR, если нужно)
+- Загрузка документов (PDF, DOCX, TXT)
+- Извлечение текста (через OCR для изображений, если нужно)
 - Извлечение таблиц
-- Семантическое разбиение текста на чанки
+- Семантическое разбиение текста на чанки с поддержкой перекрытия
 
 Интегрирует UMS для использования Vision-модели (Qwen-VL) для OCR.
 """
@@ -14,6 +14,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import json
+import os
+from pathlib import Path
 from ums_client import process_vision_via_ums, get_embeddings_via_ums, ums_client
 
 app = FastAPI(title="MCP Document Server", version="1.0.0")
@@ -27,194 +29,266 @@ class LoadDocumentRequest(BaseModel):
     extract_tables: bool = False
     use_ocr: bool = False
 
-class LoadDocumentResponse(BaseModel):
-    status: str
-    text: Optional[str] = None
-    tables: Optional[List[List[List[str]]]] = None
-    error: Optional[str] = None
+class SmartChunkRequest(BaseModel):
+    text: str
+    max_tokens: int = 8000  # Для llama.cpp с n_ctx=8192
+    overlap: int = 100      # Перекрытие в токенах
 
 class ExtractTablesRequest(BaseModel):
     path: str
     pages: Optional[List[int]] = None
 
-class ExtractTablesResponse(BaseModel):
-    status: str
-    tables: Optional[List[Dict[str, Any]]] = None
-    error: Optional[str] = None
+# ============================================================================
+# Document Loading Functions
+# ============================================================================
 
-class SmartChunkRequest(BaseModel):
-    text: str
-    chunk_size: int = 512
-    overlap: int = 50
-    strategy: str = "semantic"  # "semantic" или "fixed"
+def load_pdf(path: str) -> str:
+    """Извлечение текста из PDF."""
+    try:
+        import pdfplumber
+        text = ""
+        with pdfplumber.open(path) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                text += f"\n--- Page {page_num} ---\n"
+                text += page.extract_text() or ""
+        return text
+    except ImportError:
+        raise RuntimeError("pdfplumber not installed. Install with: pip install pdfplumber")
+    except Exception as e:
+        raise RuntimeError(f"Error reading PDF: {e}")
 
-class SmartChunkResponse(BaseModel):
-    status: str
-    chunks: Optional[List[str]] = None
-    error: Optional[str] = None
+def load_docx(path: str) -> str:
+    """Извлечение текста из DOCX."""
+    try:
+        from docx import Document
+        doc = Document(path)
+        text = "\n".join([para.text for para in doc.paragraphs])
+        return text
+    except ImportError:
+        raise RuntimeError("python-docx not installed. Install with: pip install python-docx")
+    except Exception as e:
+        raise RuntimeError(f"Error reading DOCX: {e}")
+
+def load_txt(path: str) -> str:
+    """Загрузка текста из TXT."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        raise RuntimeError(f"Error reading TXT: {e}")
 
 # ============================================================================
-# Endpoints
+# Chunking Functions
+# ============================================================================
+
+def smart_chunk(text: str, max_tokens: int = 8000, overlap: int = 100) -> List[str]:
+    """
+    Умное разбиение текста на чанки с поддержкой перекрытия.
+    
+    Стратегия:
+    1. Разбиение по логическим границам (абзацы, главы)
+    2. Учет размера контекста модели (max_tokens)
+    3. Перекрытие между чанками для сохранения контекста
+    
+    Args:
+        text: Исходный текст
+        max_tokens: Максимальное количество токенов в чанке (примерно)
+        overlap: Перекрытие в токенах между соседними чанками
+    
+    Returns:
+        Список чанков
+    """
+    # Разбиваем по абзацам (логические границы)
+    paragraphs = text.split('\n\n')
+    
+    chunks = []
+    current_chunk = ""
+    current_token_count = 0
+    
+    # Примерный подсчет: 1 слово ≈ 1.3 токена
+    for para in paragraphs:
+        para_tokens = len(para.split()) * 1.3
+        
+        # Если добавление абзаца превышает лимит, сохраняем текущий чанк
+        if current_token_count + para_tokens > max_tokens and current_chunk:
+            chunks.append(current_chunk.strip())
+            current_chunk = para + "\n\n"
+            current_token_count = para_tokens
+        else:
+            current_chunk += para + "\n\n"
+            current_token_count += para_tokens
+    
+    # Добавляем последний чанк
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    # Добавляем перекрытие между чанками
+    if overlap > 0 and len(chunks) > 1:
+        overlapped_chunks = []
+        overlap_lines_count = max(1, int(overlap / 50))  # Примерно 50 токенов на строку
+        
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                # Берем последние overlap_lines из предыдущего чанка
+                prev_lines = chunks[i-1].split('\n')
+                overlap_lines = prev_lines[-overlap_lines_count:]
+                overlapped_chunks.append('\n'.join(overlap_lines) + '\n\n' + chunk)
+            else:
+                overlapped_chunks.append(chunk)
+        
+        chunks = overlapped_chunks
+    
+    return chunks
+
+# ============================================================================
+# API Endpoints
 # ============================================================================
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "mcp-document-server"}
+    """Health check."""
+    return {"status": "healthy", "service": "document_server"}
 
-@app.post("/load_document", response_model=LoadDocumentResponse)
+@app.post("/load_document")
 async def load_document(request: LoadDocumentRequest):
     """
-    Загружает документ и возвращает его текстовое представление.
+    Загружает документ и извлекает текст.
     
-    Если use_ocr=True, использует Vision-модель (Qwen-VL) через UMS для OCR.
+    Поддерживаемые форматы: PDF, DOCX, TXT.
     """
-    print(f"[DOC_SERVER] Loading document: {request.path}")
-    
     try:
-        # Имитация загрузки документа
-        # В реальном проекте здесь будет логика для парсинга PDF/DOCX
+        path = request.path
         
-        if "contract_old" in request.path:
-            text = "Document A: Contract text (old version). Clause 1: Price is $100. Clause 2: Delivery in 30 days."
-        elif "contract_new" in request.path:
-            text = "Document B: Contract text (new version). Clause 1: Price is $120. Clause 2: Delivery in 15 days."
-        else:
-            # Если нужен OCR, используем UMS
-            if request.use_ocr:
-                text = process_vision_via_ums(request.path, "Extract all text from this document.")
+        # Проверяем существование файла
+        if not os.path.exists(path):
+            # Для тестирования возвращаем mock-данные
+            if "contract_old" in path:
+                text = "Document A: Contract text (old version). Clause 1: Price is $100. Clause 2: Delivery in 30 days."
+            elif "contract_new" in path:
+                text = "Document B: Contract text (new version). Clause 1: Price is $120. Clause 2: Delivery in 15 days."
             else:
-                text = f"Document {request.path} loaded successfully."
-        
-        # Опционально извлекаем таблицы
-        tables = None
-        if request.extract_tables:
-            tables = _extract_tables_mock(request.path)
-        
-        return LoadDocumentResponse(
-            status="success",
-            text=text,
-            tables=tables
-        )
-    
-    except Exception as e:
-        return LoadDocumentResponse(
-            status="error",
-            error=str(e)
-        )
-
-@app.post("/extract_tables", response_model=ExtractTablesResponse)
-async def extract_tables(request: ExtractTablesRequest):
-    """Извлекает таблицы из документа."""
-    print(f"[DOC_SERVER] Extracting tables from: {request.path}")
-    
-    try:
-        tables = _extract_tables_mock(request.path)
-        return ExtractTablesResponse(
-            status="success",
-            tables=tables
-        )
-    except Exception as e:
-        return ExtractTablesResponse(
-            status="error",
-            error=str(e)
-        )
-
-@app.post("/smart_chunk", response_model=SmartChunkResponse)
-async def smart_chunk(request: SmartChunkRequest):
-    """
-    Разбивает текст на чанки.
-    
-    Если strategy="semantic", использует эмбеддинги (через UMS) для
-    определения границ чанков на основе семантического сходства.
-    """
-    print(f"[DOC_SERVER] Smart chunking text (strategy={request.strategy})")
-    
-    try:
-        if request.strategy == "semantic":
-            # Используем эмбеддинги через UMS для умного разбиения
-            chunks = _semantic_chunking(request.text, request.chunk_size, request.overlap)
-        else:
-            # Простое разбиение по размеру
-            chunks = _fixed_chunking(request.text, request.chunk_size, request.overlap)
-        
-        return SmartChunkResponse(
-            status="success",
-            chunks=chunks
-        )
-    except Exception as e:
-        return SmartChunkResponse(
-            status="error",
-            error=str(e)
-        )
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def _extract_tables_mock(path: str) -> List[Dict[str, Any]]:
-    """Имитация извлечения таблиц из документа."""
-    # В реальном проекте здесь будет логика для парсинга таблиц
-    # с помощью pdfplumber, python-docx и т.д.
-    
-    if "contract" in path:
-        return [
-            {
-                "page": 1,
-                "table": [
-                    ["Item", "Old Value", "New Value"],
-                    ["Price", "$100", "$120"],
-                    ["Delivery", "30 days", "15 days"]
-                ]
+                text = f"[Mock] Document {path} loaded successfully."
+            
+            return {
+                "status": "success",
+                "text": text,
+                "path": path,
+                "format": "mock",
+                "length": len(text)
             }
-        ]
-    else:
-        return []
-
-def _fixed_chunking(text: str, chunk_size: int, overlap: int) -> List[str]:
-    """Простое разбиение текста на чанки по размеру."""
-    chunks = []
-    start = 0
-    
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        chunks.append(text[start:end])
-        start = end - overlap
-    
-    return chunks
-
-def _semantic_chunking(text: str, chunk_size: int, overlap: int) -> List[str]:
-    """
-    Умное разбиение текста на чанки на основе семантического сходства.
-    
-    Использует эмбеддинги через UMS.
-    """
-    # Сначала разбиваем на предложения
-    sentences = text.split('. ')
-    
-    chunks = []
-    current_chunk = ""
-    
-    for sentence in sentences:
-        if len(current_chunk) + len(sentence) < chunk_size:
-            current_chunk += sentence + ". "
+        
+        # Определяем формат файла
+        file_ext = Path(path).suffix.lower()
+        
+        if file_ext == ".pdf":
+            text = load_pdf(path)
+            format_type = "pdf"
+        elif file_ext == ".docx":
+            text = load_docx(path)
+            format_type = "docx"
+        elif file_ext == ".txt":
+            text = load_txt(path)
+            format_type = "txt"
         else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence + ". "
+            return {
+                "status": "error",
+                "error": f"Unsupported file format: {file_ext}. Supported: PDF, DOCX, TXT"
+            }
+        
+        # Если нужно, используем OCR для изображений
+        if request.use_ocr and file_ext in [".jpg", ".png", ".jpeg"]:
+            text = process_vision_via_ums(path, "Extract all text from this image")
+            format_type = "image_ocr"
+        
+        return {
+            "status": "success",
+            "text": text,
+            "path": path,
+            "format": format_type,
+            "length": len(text)
+        }
     
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    # В реальном проекте здесь можно использовать эмбеддинги для
-    # определения оптимальных границ чанков
-    # embeddings = [get_embeddings_via_ums(chunk) for chunk in chunks]
-    
-    return chunks
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
-# ============================================================================
-# Main
-# ============================================================================
+@app.post("/smart_chunk")
+async def smart_chunk_endpoint(request: SmartChunkRequest):
+    """
+    Разбивает текст на чанки с учетом контекста модели.
+    
+    Использует семантическое разбиение по абзацам и добавляет перекрытие.
+    """
+    try:
+        chunks = smart_chunk(
+            request.text,
+            max_tokens=request.max_tokens,
+            overlap=request.overlap
+        )
+        
+        return {
+            "status": "success",
+            "chunks": chunks,
+            "chunk_count": len(chunks),
+            "strategy": "semantic_with_overlap",
+            "max_tokens": request.max_tokens,
+            "overlap": request.overlap
+        }
+    
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+@app.post("/extract_tables")
+async def extract_tables(request: ExtractTablesRequest):
+    """
+    Извлекает таблицы из PDF.
+    """
+    try:
+        import pdfplumber
+        
+        if not os.path.exists(request.path):
+            return {
+                "status": "error",
+                "error": f"File not found: {request.path}"
+            }
+        
+        tables = []
+        with pdfplumber.open(request.path) as pdf:
+            pages_to_process = request.pages or range(len(pdf.pages))
+            
+            for page_num in pages_to_process:
+                if page_num < len(pdf.pages):
+                    page = pdf.pages[page_num]
+                    page_tables = page.extract_tables()
+                    
+                    if page_tables:
+                        for table in page_tables:
+                            tables.append({
+                                "page": page_num + 1,
+                                "data": table
+                            })
+        
+        return {
+            "status": "success",
+            "tables": tables,
+            "table_count": len(tables)
+        }
+    
+    except ImportError:
+        return {
+            "status": "error",
+            "error": "pdfplumber not installed. Install with: pip install pdfplumber"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn
