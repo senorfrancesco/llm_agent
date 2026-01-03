@@ -8,6 +8,11 @@ ReAct Agent with HTTP Clients for MCP Servers.
 import json
 import requests
 from typing import TypedDict, List, Dict, Any
+import sys
+import os
+
+# Добавляем путь к model_manager
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'services', 'model_manager'))
 
 from langgraph.graph import StateGraph, END
 

@@ -16,6 +16,11 @@ from typing import List, Dict, Any, Optional
 import json
 import os
 from pathlib import Path
+import sys
+
+# Добавляем путь к model_manager
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'model_manager'))
+
 from ums_client import process_vision_via_ums, get_embeddings_via_ums, ums_client
 
 app = FastAPI(title="MCP Document Server", version="1.0.0")

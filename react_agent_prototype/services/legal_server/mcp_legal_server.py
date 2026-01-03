@@ -15,6 +15,12 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import json
+import sys
+import os
+
+# Добавляем путь к model_manager
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'model_manager'))
+
 from ums_client import get_embeddings_via_ums, generate_text_via_ums, ums_client
 
 app = FastAPI(title="MCP Legal Server", version="1.0.0")

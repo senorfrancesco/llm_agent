@@ -92,19 +92,25 @@ python3.11 test_system.py
 ## Структура Прототипа
 
 ```
-react_agent_prototype/
-├── react_agent_http.py            # ReAct-агент (LangGraph)
-├── mcp_document_server.py         # Document Server (FastAPI)
-├── mcp_legal_server.py            # Legal Server (FastAPI)
-├── ums_client.py                  # UMS HTTP-клиент
-├── unified_model_server.py        # Unified Model Server (UMS) - Реальная логика
-├── models_config.py               # Конфигурация моделей
-├── test_system.py                 # Скрипт для тестирования
-├── run_all.sh                     # Скрипт для запуска через tmux
-├── requirements.txt               # Зависимости Python
-├── .gitignore                     # Git ignore
-└── README.md                      # Этот файл
-```
+	.
+	├── README.md
+	├── requirements.txt
+	├── .gitignore
+	├── run_all.sh
+	├── test_system.py
+	├── orchestrator/
+	│   └── react_agent_http.py        # ReAct Agent (LangGraph)
+	├── services/
+	│   ├── document_server/
+	│   │   └── mcp_document_server.py # MCP Document Server (FastAPI)
+	│   ├── legal_server/
+	│   │   └── mcp_legal_server.py    # MCP Legal Server (FastAPI)
+	│   └── model_manager/
+	│       ├── unified_model_server.py# Unified Model Server (UMS) - Реальная логика
+	│       ├── ums_client.py          # UMS HTTP-клиент
+	│       └── models_config.py       # Конфигурация моделей
+	└── REQUIREMENTS_ANALYSIS.md
+	```}],path:
 
 ## Следующие шаги
 
