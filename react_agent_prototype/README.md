@@ -30,9 +30,9 @@ graph TD
     D --> E
     E --> F
     
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style E fill:#ccf,stroke:#333,stroke-width:2px
-    style F fill:#9f9,stroke:#333,stroke-width:2px
+    style A fill:#f9f,stroke:#333,stroke-width:2px,color:#000
+    style E fill:#ccf,stroke:#333,stroke-width:2px,color:#000
+    style F fill:#9f9,stroke:#333,stroke-width:2px,color:#000
 ```
 
 ### Ключевые компоненты
