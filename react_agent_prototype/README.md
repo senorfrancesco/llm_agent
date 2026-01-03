@@ -8,19 +8,19 @@
 
 ```mermaid
 graph TD
-    subgraph Orchestration Layer
-        A[ReAct Agent (LangGraph)]
+    subgraph S1 ["Orchestration Layer"]
+        A["ReAct Agent (LangGraph)"]
     end
     
-    subgraph Microservice Layer (MCP Servers)
-        B[MCP Document Server (8001)]
-        C[MCP Legal Server (8002)]
+    subgraph S2 ["Microservice Layer (MCP Servers)"]
+        B["MCP Document Server (8001)"]
+        C["MCP Legal Server (8002)"]
     end
     
-    subgraph Model Management Layer
-        D[UMS Client (HTTP)]
-        E[Unified Model Server (UMS: 8090)]
-        F[llama-server (llama-cpp-python)]
+    subgraph S3 ["Model Management Layer"]
+        D["UMS Client (HTTP)"]
+        E["Unified Model Server (UMS: 8090)"]
+        F["llama-server (llama-cpp-python)"]
     end
     
     A --> B
