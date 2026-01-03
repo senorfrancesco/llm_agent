@@ -1,0 +1,14 @@
+langchain
+langgraph
+pydantic
+fastapi
+uvicorn
+requests
+python-dotenv
+
+# Для работы с локальными моделями
+llama-cpp-python[server]
+
+# Для мониторинга ресурсов (опционально, для MMS)
+psutil
+pynvml
