@@ -1,100 +1,65 @@
-# ReAct Agent Prototype with Unified Model Server
+# ReAct Agent Prototype: Microservice Architecture for Document Analysis
 
-Этот прототип демонстрирует микросервисную архитектуру для агентной системы обработки документов с использованием **LangGraph**, **FastAPI** и **llama-cpp-python**.
+Этот прототип демонстрирует переход от монолитной архитектуры к микросервисной для агентной системы обработки документов. Он реализует концепцию **Unified Model Server (UMS)** для эффективного управления ресурсами на одной машине.
+
+Проект использует **LangGraph** для оркестрации, **FastAPI** для создания независимых сервисов (MCP-серверов) и **llama-cpp-python** для инференса локальных моделей.
 
 ## Архитектура
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    ReAct Agent (LangGraph)                      │
-│  - Orchestration Layer                                          │
-│  - Thought → Action → Observation Loop                          │
-└────────────┬──────────────────────────────────┬─────────────────┘
-             │                                  │
-             ▼                                  ▼
-    ┌────────────────────┐          ┌────────────────────┐
-    │ Document Server    │          │  Legal Server      │
-    │ (FastAPI)          │          │  (FastAPI)         │
-    │ Port: 8001         │          │  Port: 8002        │
-    │                    │          │                    │
-    │ - load_document    │          │ - compare_chunks   │
-    │ - extract_tables   │          │ - analyze_impact   │
-    │ - smart_chunk      │          │ - generate_report  │
-    └────────┬───────────┘          └────────┬───────────┘
-             │                               │
-             └───────────────┬───────────────┘
-                             ▼
-                    ┌────────────────────┐
-                    │ UMS Client         │
-                    │ (HTTP)             │
-                    │                    │
-                    │ Requests to UMS    │
-                    └────────┬───────────┘
-                             │
-                             ▼
-                    ┌────────────────────┐
-                    │ Unified Model      │
-                    │ Server (UMS)       │
-                    │ Port: 8090         │
-                    │                    │
-                    │ - Dynamic Loading  │
-                    │ - Smart Swapping   │
-                    │ - CPU/GPU/Hybrid   │
-                    └────────┬───────────┘
-                             │
-                             ▼
-                    ┌────────────────────┐
-                    │ llama-cpp-python   │
-                    │ (llama-server)     │
-                    │                    │
-                    │ Models:            │
-                    │ - Qwen-14B-LLM     │
-                    │ - Qwen-VL-Vision   │
-                    │ - LaBSE-Embedding  │
-                    └────────────────────┘
+```mermaid
+graph TD
+    subgraph Orchestration Layer
+        A[ReAct Agent (LangGraph)]
+    end
+    
+    subgraph Microservice Layer (MCP Servers)
+        B[MCP Document Server (8001)]
+        C[MCP Legal Server (8002)]
+    end
+    
+    subgraph Model Management Layer
+        D[UMS Client (HTTP)]
+        E[Unified Model Server (UMS: 8090)]
+        F[llama-server (llama-cpp-python)]
+    end
+    
+    A --> B
+    A --> C
+    B --> D
+    C --> D
+    D --> E
+    E --> F
+    
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style E fill:#ccf,stroke:#333,stroke-width:2px
+    style F fill:#9f9,stroke:#333,stroke-width:2px
 ```
 
-## Компоненты
+### Ключевые компоненты
 
-### 1. **ReAct Agent** (`react_agent_http.py`)
-- Главный оркестратор, использующий LangGraph
-- Реализует цикл Thought → Action → Observation
-- Делает HTTP-запросы к MCP-серверам
-- Управляет логикой выполнения задач
+| Компонент | Файл | Роль |
+| :--- | :--- | :--- |
+| **ReAct Agent** | `react_agent_http.py` | Главный оркестратор (LangGraph). Делает HTTP-запросы к MCP-серверам. |
+| **Document Server** | `mcp_document_server.py` | Сервис для работы с документами (загрузка, чанкинг, OCR). |
+| **Legal Server** | `mcp_legal_server.py` | Сервис для юридического анализа (сравнение, анализ изменений). |
+| **UMS Client** | `ums_client.py` | HTTP-клиент для UMS. Предоставляет функции `generate_text`, `get_embeddings` и `process_vision`. |
+| **Unified Model Server (UMS)** | `unified_model_server.py` | **Реализованный прототип.** Динамически управляет `llama-server` для загрузки/выгрузки моделей (Qwen, LaBSE) и оптимизации VRAM. |
 
-### 2. **MCP Document Server** (`mcp_document_server.py`)
-- FastAPI приложение на порту 8001
-- Функции:
-  - `/load_document` - загрузка документов
-  - `/extract_tables` - извлечение таблиц
-  - `/smart_chunk` - умное разбиение текста на чанки
-- Интегрирует UMS-клиент для OCR и эмбеддингов
+## Особенности реализации
 
-### 3. **MCP Legal Server** (`mcp_legal_server.py`)
-- FastAPI приложение на порту 8002
-- Функции:
-  - `/compare_chunks` - сравнение двух текстов
-  - `/analyze_impact` - анализ юридической значимости различий
-  - `/generate_report` - генерация отчётов
-- Интегрирует UMS-клиент для эмбеддингов и LLM-анализа
-
-### 4. **UMS Client** (`ums_client.py`)
-- HTTP-клиент для общения с Unified Model Server
-- Предоставляет функции:
-  - `generate_text_via_ums()` - генерация текста через LLM
-  - `get_embeddings_via_ums()` - получение эмбеддингов
-  - `process_vision_via_ums()` - обработка изображений через Vision-модель
-
-### 5. **Unified Model Server** (`unified_model_server.py`)
-- Управляет загрузкой/выгрузкой моделей
-- Поддерживает режимы: GPU, CPU, Hybrid
-- Реализует Smart Swapping для оптимизации VRAM
-- В текущем прототипе это заглушка; в реальном проекте будет отдельным сервисом
+1.  **Динамическое управление моделями (UMS):** UMS запускает `llama-server` в отдельном процессе, загружая модель только по требованию. Это позволяет избежать конфликтов VRAM и максимизировать скорость инференса.
+2.  **Адаптивная оптимизация:** UMS поддерживает режимы **GPU**, **CPU** и **Hybrid** (`--n_gpu_layers`) для адаптации к доступному оборудованию (например, RTX 3060 + 32GB RAM).
+3.  **Инструменты для Агента:** MCP-серверы реализованы как **внешние инструменты** для ReAct-агента, что соответствует принципу разделения ответственности и масштабируемости.
 
 ## Установка
 
+Для запуска прототипа вам потребуется:
+1.  Установить Python 3.11+.
+2.  Установить зависимости, включая `llama-cpp-python[server]`.
+3.  Разместить GGUF-файлы моделей.
+
 ```bash
-# 1. Перейти в директорию проекта
+# 1. Перейти в директорию прототипа
 cd react_agent_prototype
 
 # 2. Создать виртуальное окружение
@@ -102,125 +67,40 @@ python3.11 -m venv venv
 source venv/bin/activate
 
 # 3. Установить зависимости
+# ВНИМАНИЕ: Для llama-cpp-python может потребоваться установка build-essential и cmake
 pip install -r requirements.txt
 ```
 
-## Запуск
+## Запуск и Тестирование
 
-### Вариант 1: Автоматический запуск всех компонентов (с tmux)
-
-```bash
-./run_all.sh
-```
-
-Это запустит все компоненты в отдельных окнах tmux:
-- `doc-server` - Document Server
-- `legal-server` - Legal Server
-- `react-agent` - ReAct Agent
-- `monitor` - Окно для мониторинга
-
-### Вариант 2: Запуск с тестом системы
+### Вариант 1: Запуск с тестом системы (рекомендуется)
 
 ```bash
 python3.11 test_system.py
 ```
 
-Этот скрипт:
-1. Запускает MCP-серверы в фоне
-2. Ожидает их инициализации
-3. Запускает ReAct-агент
-4. Собирает результаты
-5. Останавливает все процессы
+Этот скрипт автоматически запускает UMS, MCP-серверы в фоне, выполняет ReAct-агент и завершает все процессы.
 
-### Вариант 3: Ручной запуск компонентов
+### Вариант 2: Ручной запуск всех компонентов
 
-**Терминал 1 - Document Server:**
-```bash
-source venv/bin/activate
-python3.11 mcp_document_server.py
-```
-
-**Терминал 2 - Legal Server:**
-```bash
-source venv/bin/activate
-python3.11 mcp_legal_server.py
-```
-
-**Терминал 3 - ReAct Agent:**
-```bash
-source venv/bin/activate
-python3.11 react_agent_http.py
-```
-
-## Тестирование
-
-### Проверка доступности серверов
+Используйте `run_all.sh` для запуска всех компонентов в отдельных окнах `tmux`.
 
 ```bash
-# Document Server
-curl http://localhost:8001/health
-
-# Legal Server
-curl http://localhost:8002/health
+./run_all.sh
 ```
 
-### Тестирование Document Server
-
-```bash
-curl -X POST http://localhost:8001/load_document \
-  -H "Content-Type: application/json" \
-  -d '{"path": "contract_old.pdf"}'
-```
-
-### Тестирование Legal Server
-
-```bash
-curl -X POST http://localhost:8002/compare_chunks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "old_text": "Document A: Contract text (old version). Clause 1: Price is $100. Clause 2: Delivery in 30 days.",
-    "new_text": "Document B: Contract text (new version). Clause 1: Price is $120. Clause 2: Delivery in 15 days."
-  }'
-```
-
-## Примеры использования
-
-### Пример 1: Сравнение двух документов
-
-```python
-from react_agent_http import create_react_graph
-
-app = create_react_graph()
-
-initial_state = {
-    "user_query": "Сравни contract_old.pdf и contract_new.pdf",
-    "chat_history": [],
-    "available_tools": ["document_server.load_document", "legal_server.compare_chunks"],
-    "current_thought": "",
-    "planned_action": {},
-    "observation": "",
-    "final_answer": "",
-    "is_finished": False
-}
-
-for step in app.stream(initial_state):
-    print(step)
-```
-
-## Структура проекта
+## Структура Прототипа
 
 ```
 react_agent_prototype/
-├── react_agent.py                 # Оригинальный ReAct-агент (заглушки)
-├── react_agent_http.py            # ReAct-агент с HTTP-клиентами
+├── react_agent_http.py            # ReAct-агент (LangGraph)
 ├── mcp_document_server.py         # Document Server (FastAPI)
 ├── mcp_legal_server.py            # Legal Server (FastAPI)
-├── mcp_servers_mock.py            # Mock-серверы (для справки)
 ├── ums_client.py                  # UMS HTTP-клиент
-├── unified_model_server.py        # UMS (заглушка)
+├── unified_model_server.py        # Unified Model Server (UMS) - Реальная логика
 ├── models_config.py               # Конфигурация моделей
-├── test_system.py                 # Скрипт для тестирования системы
-├── run_all.sh                     # Скрипт для запуска всех компонентов
+├── test_system.py                 # Скрипт для тестирования
+├── run_all.sh                     # Скрипт для запуска через tmux
 ├── requirements.txt               # Зависимости Python
 ├── .gitignore                     # Git ignore
 └── README.md                      # Этот файл
@@ -228,16 +108,6 @@ react_agent_prototype/
 
 ## Следующие шаги
 
-1. **Реализация реального UMS** - создать отдельный сервис с управлением моделями
-2. **Интеграция llama-cpp-python** - подключить реальные модели
-3. **Добавление новых MCP-серверов** - Procurement Server, Analytics Server и т.д.
-4. **Оптимизация производительности** - кэширование, батчинг запросов
-5. **Развертывание в Docker** - контейнеризация всех компонентов
-
-## Лицензия
-
-MIT
-
-## Автор
-
-Разработано как прототип микросервисной архитектуры для агентной системы обработки документов.
+1.  **Интеграция RAG:** Добавление RAG-системы в Document Server для более точного контекста.
+2.  **Оптимизация чанкинга:** Реализация "умного" разбиения документов на чанки (`smart_chunk`) с учётом семантики и структуры документа.
+3.  **Переход на vLLM:** Модификация UMS для поддержки vLLM для моделей с большим контекстом (32K+ токенов), как описано в `ЗадачаподLLM.txt`.
